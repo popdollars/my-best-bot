@@ -1,25 +1,18 @@
-"""TelegramNotifier: plain `requests.post` to the Bot API, never blocks the trading loop.
-
-* notify()         -> thread-safe, non-blocking (queued, delivered by a daemon worker thread)
-* send_urgent()    -> synchronous, bypasses the queue (circuit-breaker / kill-switch alerts)
-* send_async()     -> awaitable wrapper (runs requests.post in a worker thread)
-"""
+"""TelegramNotifier: plain `requests.post` to the Bot API, never blocks the trading loop."""
 from __future__ import annotations
-
 import asyncio
 import logging
 import queue
 import threading
 import time
 from datetime import datetime, timezone
-
 import requests
 
 log = logging.getLogger("bot.telegram")
 
-API_URL = "https://api.telegram.org/bot{8851647603:AAEKYziDsyCGJk7dBS8AApFAijDL80TMsOk}/sendMessage"
+# FIXED: Uses {token} so it can be formatted securely from environment variables
+API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _SENTINEL = object()
-
 
 class TelegramNotifier:
     def __init__(self, cfg) -> None:
@@ -32,7 +25,6 @@ class TelegramNotifier:
         if not self.enabled:
             log.warning("Telegram disabled (TELEGRAM_TOKEN / TELEGRAM_CHAT_ID not set) - alerts go to log only")
 
-    # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         if self.enabled and self._worker is None:
             self._worker = threading.Thread(target=self._run, name="telegram", daemon=True)
@@ -40,7 +32,6 @@ class TelegramNotifier:
             log.info("Telegram notifier started")
 
     async def stop(self) -> None:
-        """Flush queued messages (max ~5s) and stop the worker."""
         if self._worker is None:
             return
         try:
@@ -50,9 +41,7 @@ class TelegramNotifier:
         await asyncio.to_thread(self._worker.join, 5.0)
         self._worker = None
 
-    # ------------------------------------------------------------------ sending API
     def notify(self, text: str) -> None:
-        """Non-blocking enqueue. Drops the oldest message if the queue is full."""
         log.info("TG> %s", text.replace("\n", " | "))
         if not self.enabled:
             return
@@ -66,7 +55,6 @@ class TelegramNotifier:
                 log.error("Telegram queue overflow; message dropped")
 
     def send_urgent(self, text: str) -> bool:
-        """Synchronous high-priority send (retries). Use for kill-switch / circuit breakers."""
         log.critical("TG-URGENT> %s", text.replace("\n", " | "))
         if not self.enabled:
             return False
@@ -78,7 +66,6 @@ class TelegramNotifier:
         self.notify(text)
         return True
 
-    # ------------------------------------------------------------------ message helpers
     def notify_entry(self, side: str, symbol: str, volume: float, price: float, sl: float, tp: float,
                      level: int, max_levels: int, rsi: float) -> None:
         self.notify(
@@ -103,7 +90,6 @@ class TelegramNotifier:
             f"All positions closed. Trading LOCKED until {lock_until}."
         )
 
-    # ------------------------------------------------------------------ internals
     def _run(self) -> None:
         while True:
             item = self._queue.get()
@@ -111,7 +97,7 @@ class TelegramNotifier:
                 return
             try:
                 self._post(item, attempts=3)
-            except Exception:  # noqa: BLE001 - worker must never die
+            except Exception:
                 log.exception("Telegram worker error")
 
     def _post(self, text: str, attempts: int = 3) -> bool:
@@ -132,7 +118,7 @@ class TelegramNotifier:
                     continue
                 log.error("Telegram HTTP %s: %s", resp.status_code, resp.text[:200])
                 if 400 <= resp.status_code < 500:
-                    return False  # bad token/chat id: retrying is pointless
+                    return False
             except requests.RequestException as exc:
                 log.warning("Telegram attempt %d/%d failed: %s", attempt, attempts, exc)
             time.sleep(min(2 ** attempt, 15))
